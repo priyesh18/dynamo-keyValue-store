@@ -1,6 +1,7 @@
 package edu.buffalo.cse.cse486586.simpledynamo;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -41,7 +42,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 	static final String REMOTE_PORT4 = "11124";
 	private static final String KEY_FIELD = "key";
 	private static final String VALUE_FIELD = "value";
+	private static boolean theHack = false;
 	private static String currDevicePort;
+	private static Avd currDevice;
 	List<String> allKeys = new ArrayList<>();
 	List<Avd> activeDevices = new ArrayList<>();
 	private static final String[] portList = new String[]{
@@ -87,6 +90,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		public String getHash() {
 			return this.hash;
 		}
+		public String toString() { return "Port:" + this.port +" ,Pref1:"+this.pref1_port+" ,Pref2:"+this.pref2_port; }
 
 
 	}
@@ -112,12 +116,16 @@ public class SimpleDynamoProvider extends ContentProvider {
 		Avd temp = null;
 		for(int i = 0; i < portList.length-2; i++) {
 			temp = new Avd(portList[i], portList[i+1], portList[i+2]);
+			if(portList[i].equals(currDevicePort)) currDevice = temp;
 			activeDevices.add(temp);
 		}
+		Log.d("My_port", currDevice.getPort());
 
 //		for(Avd a: activeDevices) {
 //            Log.v(a.getPort(), "Pref1: "+ a.pref1_port + " Pref2: "+ a.pref2_port);
 //        }
+		// Failure Handling
+		new FailSafe().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR,myPort,null);
 
 
 		try {
@@ -127,16 +135,31 @@ public class SimpleDynamoProvider extends ContentProvider {
 			Log.e(TAG, "Can't create a ServerSocket");
 			return false;
 		}
-//		//replace myPort with getPort;
-//		if(!myPort.equals(REMOTE_PORT0)) {
-//			String msg = "J,"+portStr+"\n";
-//			String recPort = REMOTE_PORT0;
-//			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, msg, recPort);
-//		}
+
 
 
 
 		return false;
+	}
+	private class FailSafe extends  AsyncTask<String, Void, Void> {
+
+		@Override
+		protected  Void doInBackground(String... params) {
+			Cursor c = query(null,null, "*", new String[]{}, null);
+			while(c.moveToNext()) {
+				ContentValues cv = new ContentValues();
+				String key = c.getString(0);
+				String value = c.getString(1);
+				Avd tempAvd = getAVD(key);
+//				Log.v("Fail Safe", tempAvd.toString());
+				if(tempAvd.getPort().equals(currDevice.pref2_port) || tempAvd.getPort().equals(currDevice.pref1_port)) continue;
+				cv.put(KEY_FIELD, key);
+				cv.put(VALUE_FIELD, value);
+				insert(null, cv);
+			}
+
+			return null;
+		}
 	}
 
 	private class ServerTask extends AsyncTask<ServerSocket, String, Void> {
@@ -163,11 +186,11 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 					}
 					else if(str[0].equals("Q")) {
-						Log.d(TAG, "Query request received for:"+str[1]);
-						Log.d("server", "key found");
+						Log.v(TAG, "Query request received for:"+str[1]);
 						Cursor c = query(null,null, str[1], new String[]{}, null);
 						while(c.moveToNext()) {
 							String pair = c.getString(0) +","+ c.getString(1);
+//							Log.v("Server Query", pair);
 							out.println(pair);
 						}
 						out.println("done");
@@ -175,6 +198,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					}
 					else if(str[0].equals("R")) {
 						Log.d(TAG, "Remove request received for:"+str[1]);
+						delete(null, str[1], new String[]{} );
 					}
 					else {
 						Log.e(TAG,"You are sending something wrong!");
@@ -213,6 +237,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 				socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
 						Integer.parseInt(recPort));
+				socket.setTcpNoDelay(true);
+
 
 				out = new PrintWriter(socket.getOutputStream(), true);
 				out.println(msgToSend);
@@ -222,7 +248,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 				in = new BufferedReader(
 						new InputStreamReader(socket.getInputStream()));
 				replyStr = in.readLine();
-				String[] reply = replyStr.split(",");
+//				String[] reply = replyStr.split(",");
 //				if(reply[0].equals("J")) {
 //					currentAvd.pred_port = "10000"; // this port doesn't matter.
 //				}
@@ -231,6 +257,8 @@ public class SimpleDynamoProvider extends ContentProvider {
 				Log.e(TAG, "ClientTask UnknownHostException");
 			} catch (IOException e) {
 				Log.e(TAG, "ClientTask socket IOException");
+			} catch (Exception e) {
+				e.printStackTrace();
 			}
 
 
@@ -263,17 +291,27 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 	@Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
-		if(selection.compareTo("@") == 0) {
-			allKeys.clear();
-			Log.v(TAG, "Deleting @");
-		}
-		else if(selection.compareTo("*") == 0) {
-			// get the correct port of the msg's location, create a new client and sent the delete query to that port.
-			Log.v(TAG, "Deleting from all *");
-		}
-		else {
-			//perform the following line in the responsible avd.
-			allKeys.remove(selection);
+		Log.i("Inside Delete", "Uri"+uri);
+		String[] fils = getContext().getApplicationContext().fileList();
+		theHack = true;
+
+			for(String k: fils) {
+				try {
+					Log.d("Delete loop for files",""+getContext().getApplicationContext().deleteFile(k));
+
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+
+			}
+//		}
+
+		allKeys.clear();
+		if(uri != null) {
+			Avd temp = getAVD(selection);
+			for(String p: temp.pref_list) {
+				new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "R," + selection+ "\n", p);
+			}
 		}
 		return 0;
 	}
@@ -282,6 +320,45 @@ public class SimpleDynamoProvider extends ContentProvider {
 	public String getType(Uri uri) {
 		// TODO Auto-generated method stub
 		return null;
+	}
+
+	public String syncClient(String msg, String port) {
+		try {
+
+			String msgToSend = msg;
+			String recPort = port;
+			String replyStr = "Empty";
+
+			BufferedReader in;
+
+			Socket socket;
+			PrintWriter out;
+
+			socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+					Integer.parseInt(recPort));
+			socket.setTcpNoDelay(true);
+
+
+			out = new PrintWriter(socket.getOutputStream(), true);
+			out.println(msgToSend);
+
+
+			//Reply from the server
+			in = new BufferedReader(
+					new InputStreamReader(socket.getInputStream()));
+			replyStr = in.readLine();
+			return replyStr;
+
+
+		} catch (UnknownHostException e) {
+			Log.e(TAG, "ClientTask UnknownHostException");
+		} catch (IOException e) {
+			Log.e(TAG, "ClientTask socket IOException");
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		return "Some error";
+
 	}
 
 	@Override
@@ -293,7 +370,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 		String filename = null;
 		if(uri == null) {
 			// request came from server insert
-			Log.d("From Insert if", "HI");
+			Log.v("From Insert if", k);
 			try {
 				filename = genHash(k);
 			}
@@ -305,9 +382,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 			// request received from other activity.
 			Avd temp = getAVD(k);
 			String port = temp.getPort();
-			Log.d("From Insert else ", port);
-//			new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "I," + k + "," + v + "\n", port);
+			Log.v("From Insert else ", k);
 			for(String p: temp.pref_list) {
+//				String reply = syncClient("I," + k + "," + v + "\n", p);
 				new ClientTask().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR, "I," + k + "," + v + "\n", p);
 			}
 			return null;
@@ -316,45 +393,57 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		String fileContents = v;
 //        Log.e(TAG, "inside insert");
-		try (FileOutputStream fos = getContext().openFileOutput(filename, Context.MODE_PRIVATE)) {
-			fos.write(fileContents.getBytes());
-			allKeys.add(k);
-		} catch (FileNotFoundException e) {
-			Log.e(TAG, "File not found exception in insert");
+//		synchronized (this) {
+			try (FileOutputStream fos = getContext().getApplicationContext().openFileOutput(filename, Context.MODE_PRIVATE)) {
+				fos.write(fileContents.getBytes());
+				fos.close();
+				allKeys.add(k);
 
-			e.printStackTrace();
-		} catch (IOException e) {
-			Log.e(TAG, "IOException in insert");
-			e.printStackTrace();
-		}
+			} catch (FileNotFoundException e) {
+				Log.e(TAG, "File not found exception in insert");
+
+				e.printStackTrace();
+			} catch (IOException e) {
+				Log.e(TAG, "IOException in insert");
+				e.printStackTrace();
+			}
+//		}
+
 //        Log.v(TAG, values.toString());
 		return uri;
 	}
 
 	private String queryHelper(String selection) {
 		FileInputStream fis = null;
-		try {
-			fis = getContext().openFileInput(genHash(selection));
-		} catch (FileNotFoundException e) {
-			e.printStackTrace();
-		} catch (NoSuchAlgorithmException e) {
-			e.printStackTrace();
-		}
-		InputStreamReader inputStreamReader = new InputStreamReader(fis, StandardCharsets.UTF_8);
-		StringBuilder stringBuilder = new StringBuilder();
-		try(BufferedReader reader = new BufferedReader(inputStreamReader)) {
-			String line = reader.readLine();
-			stringBuilder.append(line).append('\n');
-			return line;
+//		synchronized (this) {
+			try {
+				fis = getContext().getApplicationContext().openFileInput(genHash(selection));
+			} catch (FileNotFoundException e) {
+				e.printStackTrace();
+			} catch (NoSuchAlgorithmException e) {
+				e.printStackTrace();
+			}
+			InputStreamReader inputStreamReader = new InputStreamReader(fis, StandardCharsets.UTF_8);
+			StringBuilder stringBuilder = new StringBuilder();
+			try(BufferedReader reader = new BufferedReader(inputStreamReader)) {
+				String line = reader.readLine();
+				stringBuilder.append(line).append('\n');
+				return line;
 
 
-		}
-		catch (IOException e) {
-			// Error occurred when opening raw file for reading.
-			Log.e(TAG, "Error while opening file");
-		} finally {
-//            String contents = stringBuilder.toString();
-		}
+			}
+			catch (IOException e) {
+				// Error occurred when opening raw file for reading.
+				Log.e(TAG, "Error while opening file");
+			} finally {
+				try {
+					fis.close();
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			}
+//		}
+
 
 		return null;
 	}
@@ -366,19 +455,31 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 		MatrixCursor mc = new MatrixCursor(new String[]{"key", "value"});
 
+
 		if(selection.compareTo("@") == 0) {
 			Log.v(TAG, "Query @");
+			Log.d("Query @", ""+allKeys.size());
 			for(String k: allKeys) {
 				String line = queryHelper(k);
 				mc.newRow().add("key", k).add("value",line);
 			}
 			return mc;
 		}
+		if(theHack) {
+			Log.e("The hack", ""+theHack);
+			int i = 1000;
+			while(i-- > 0);
+			theHack = false;
+			Log.e("The hack after", ""+theHack);
+		}
+//		Avd t = getAVD(selection);
 		if(allKeys.contains(selection)) {
 			String line = queryHelper(selection);
+			Log.d("Query in local", selection);
 			mc.newRow().add("key", selection).add("value",line);
 			return mc;
 		}
+
 
 		// Needs networking now.
 		BufferedReader in;
@@ -397,7 +498,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 			while(it.hasNext()) {
 				Avd temp = it.next();
 
-				Log.d("Query in"," *" );
+				Log.v("Query in"," *" );
 				if(temp.getPort().equals(currDevicePort)) continue;
 				String msgToSend = "Q,@";
 
@@ -408,6 +509,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 					out = new PrintWriter(socket.getOutputStream(), true);
 //					Log.d("Query *", "sending to:"+temp.getLongPort());
 					out.println(msgToSend);
+					Log.d("* query sent to", temp.getPort());
 					//Reply from the server
 					in = new BufferedReader(
 							new InputStreamReader(socket.getInputStream()));
@@ -417,7 +519,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 						replyStr = in.readLine();
 						if(replyStr.equals("done")) break;
 
-						Log.v("query2", replyStr);
+//						Log.v("query2(*)", replyStr);
 
 						String[] kv = replyStr.split(",");
 						mc.newRow().add("key", kv[0]).add("value", kv[1]);
@@ -429,6 +531,9 @@ public class SimpleDynamoProvider extends ContentProvider {
 				} catch (IOException e) {
 					e.printStackTrace();
 				}
+				catch (Exception e) {
+					e.printStackTrace();
+				}
 			}
 			return mc;
 		}
@@ -436,37 +541,52 @@ public class SimpleDynamoProvider extends ContentProvider {
 			Avd temp = getAVD(selection);
 			String port = temp.getPort();
 			String msgToSend = "Q," + selection;
+			ArrayList<String> rev_list = new ArrayList<>(temp.pref_list);
+			Collections.reverse(rev_list);
 
-			try {
-				socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-						Integer.parseInt(port));
+			for(String p: rev_list) {
 
-				out = new PrintWriter(socket.getOutputStream(), true);
-				out.println(msgToSend);
-				//Reply from the server
-				in = new BufferedReader(
-						new InputStreamReader(socket.getInputStream()));
+				try {
+					socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+							Integer.parseInt(p));
 
-				String replyStr = "";
-				while(true) {
-					replyStr = in.readLine();
-					if(replyStr.equals("done")) break;
+					out = new PrintWriter(socket.getOutputStream(), true);
+					out.println(msgToSend);
+					//Reply from the server
+					in = new BufferedReader(
+							new InputStreamReader(socket.getInputStream()));
 
-					Log.d("query3", replyStr);
+					String replyStr = "";
+					while(true) {
+						replyStr = in.readLine();
+						Log.v("Q3", ""+replyStr);
+						if(replyStr == null) break;
+						if(replyStr.equals("done")) break;
 
-					String[] kv = replyStr.split(",");
-					mc.newRow().add("key", kv[0]).add("value", kv[1]);
+						Log.v("query3", replyStr);
+
+						String[] kv = replyStr.split(",");
+						mc.newRow().add("key", kv[0]).add("value", kv[1]);
+					}
+					if(replyStr.equals("done"))
+						return mc;
+
+
+
+				} catch (IOException e) {
+					e.printStackTrace();
 				}
-				return mc;
+				catch (Exception e) {
+					e.printStackTrace();
+				}
 
 
-
-			} catch (IOException e) {
-				e.printStackTrace();
 			}
-		}
 
-		return null;
+
+		}
+		mc.newRow().add("key", "Null aaya").add("value", "Shouldn't insert");
+		return mc;
 	}
 
 	@Override
